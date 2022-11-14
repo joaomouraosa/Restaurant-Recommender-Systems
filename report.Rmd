@@ -1,0 +1,1040 @@
+---
+title: "DMII Restaurant recomnendation"
+author: "Diogo Fernandes, João Sá"
+date: "April 24, 2018"
+output:
+  pdf_document: 
+      fig_crop: false
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+# Introduction
+
+Recommender systems are one of the most popular machine learning algorithms for internet business in a variety of areas. By prediction the preference or ratings that consumers would give to certain products, recommender systems perform efficient personalized marketing, matching the products to teir prespective customers[1]. Many companies with recommender systems, such as Amazon, Netflix, and Spotify, have successfly boosted ther profit by offering their consumers relevant items at the right time.
+
+The dataset for this assignment is from the UCI Machine Learning Repository[2], which was originally obtained from a recommender system prototype[2]. These data contains the features of 130 restaurants and 128 consumers in Mexico, as well as the ratings given by the consumers to some of the restaurants. The goal of this assignment is to build and compare different recommender systems.
+
+```{r libraries, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(corrplot)
+library(recommenderlab)
+library(Hmisc)
+library(DMwR)
+library(ggmap)
+
+# capitalize the first letter of a string
+capFirst <- function(s) {
+  paste(toupper(substring(s, 1, 1)), substring(s, 2), sep = "")
+}
+```
+
+# 1 Preliminary exploratory data analysis of the available data.
+
+* The data are nine csv files, including five for the restaurant information, three for the consumer information, and on for ratings.
+* 138 consumers, 130 restaurants; each restaurant in the data is identified by a placeID, and each consumer has a userID.
+* Three ratings (overall rating, food rating and service rating) are given for a restaurant-consumer pair; there are a total of 1161 ratings available.
+
+Intuitively, the main factors affecting a restaurant rating are:
+1. the quality of the food;
+2. the quality of the service provided.
+However, features of the restaurants, such as parking options, or price, may have small influences on the ratings.
+
+```{r datasets}
+payment_methods <- read.csv("RCdata/chefmozaccepts.csv")
+cuisine_kind <- read.csv("RCdata/chefmozcuisine.csv")
+open_hours <- read.csv("RCdata/chefmozhours4.csv")
+parking <- read.csv("RCdata/chefmozparking.csv")
+res_info <- read.csv("RCdata/geoplaces2.csv")
+user_cuisine <- read.csv("RCdata/usercuisine.csv")
+user_payment <- read.csv("RCdata/userpayment.csv")
+user_info <- read.csv("RCdata/userprofile.csv")
+rating <- read.csv("RCdata/rating_final.csv")
+
+user_info$budget <- factor(user_info$budget, levels=c("low","medium","high"))
+user_info$smoker <- factor(user_info$smoker, levels=c("false","true"))
+user_info$transport <- factor(user_info$transport, levels=c("on foot", "public","car owner"))
+user_info$dress_preference<- factor(user_info$dress_preferenc, levels=c("no preference", "informal","formal", "elegant"))
+```
+
+Our approach will be always alike:   
+1. Unknown values checking;   
+2. Data visualization and analysis.   
+
+## 1.1 Payment methods
+
+* Payment methods accepted by restaurants.   
+
+```{r pre_payments_summary}
+# see a few lines of data
+head(payment_methods)
+
+# see all payment methods and respective relative frequencies
+summary(payment_methods$Rpayment)
+```
+
+As there are many different payment methods we decided to join them into categories, as we don't need that much discrimination for the purpose of our analysis, so there are no lost of valuable information.   
+```{r pre_payments}
+# the two categories: Debit_Credit_cards and Others
+Debit_Credit_cards <- c("VISA", "MasterCard-Eurocard", "American_Express",
+                        "bank_debit_cards", "Visa", "Japan_Credit_Bureau",
+                        "Discover", "Diners_Club")
+Others <- c("Carte_Blanche", "gift_certificates", "checks")
+
+levels(payment_methods$Rpayment)[levels(payment_methods$Rpayment) %in%
+                                   Debit_Credit_cards] <- "Debit_Credit_cards"
+levels(payment_methods$Rpayment)[levels(payment_methods$Rpayment) %in% Others] <- "Others"
+levels(payment_methods$Rpayment) <- capFirst(levels(payment_methods$Rpayment))
+
+payment_methods <- unique(payment_methods[1:nrow(payment_methods),])
+
+# check the new levels
+levels(payment_methods$Rpayment)
+
+# check the relative frequencies of the new category-organized data
+summary(payment_methods$Rpayment)
+```
+
+Now we can get the frequency of each payment method. No surprise there, Cash is the prefered method.   
+   
+
+## 1.2 Cuisine kinds
+
+* Contains the cuisine kinds of each restaurant.
+
+```{r pre_cuisine}
+# see a few lines of data
+head(cuisine_kind)
+
+# see all cuisine kinds and respective relative frequencies
+summary(cuisine_kind$Rcuisine)
+```
+
+We are not sure if it is a good idea to gather some kinds of cuisine into categories, as there may be lost of important information. For now, stays as it is.   
+
+```{r pre_cuisine1, echo=FALSE}
+# plot the frequencies of each kind
+
+cuisine_kind_others <- cuisine_kind %>% group_by(Rcuisine) %>% summarise(cnt = n()) %>% mutate(percentage=round(cnt/sum(cnt)*100, 2)) %>%
+  filter(percentage<1) %>% mutate(Rcuisine="Others")
+
+cuisine_kind %>% group_by(Rcuisine) %>% summarise(cnt = n()) %>% mutate(percentage=round(cnt/sum(cnt)*100, 2)) %>%
+  filter(percentage>=1) %>% rbind(cuisine_kind_others) %>% ggplot(aes(x="", y=percentage, fill=Rcuisine))+geom_bar(width = 1, stat = "identity") + coord_polar("y", start=0) + ggtitle("Frequencies of each cuisine kind")
+
+```
+
+No surprise, mexican cuisine is ahead!
+
+## 1.3 Restaurant schedules
+
+* Contains the schedules of restaurants.
+
+```{r pre_openhours}
+# see a few lines of data
+head(cuisine_kind)
+
+# get a summary including only the attributes "hours" and "days"
+summary(open_hours[,c("hours", "days")])
+
+# simplify the dataset
+levels(open_hours$days)[levels(open_hours$days) == "Mon;Tue;Wed;Thu;Fri;"] <- "Weekdays"
+levels(open_hours$days)[levels(open_hours$days) == "Sat;"] <- "Saturday"
+levels(open_hours$days)[levels(open_hours$days) == "Sun;"] <- "Sunday"
+```
+
+This is a tough one to analyse and organize, as the open hours depend on days... We'll see if we will need this data for anything...
+
+## 1.4 Parking
+* Information about the kind of park available.
+
+```{r pre_parking}
+# see a few lines of data
+head(parking)
+
+# get a summary of the "parking_lot" attribute
+summary(parking$parking_lot)
+
+# plot the frequencies
+parking %>% group_by(parking_lot) %>% summarise(cnt = n()) %>% arrange(desc(cnt)) %>%
+  ggplot(aes(x=parking_lot,y=cnt)) + geom_bar(stat="identity")
+```
+
+Well, it seems like most of the restaurants doesn't care about where their customers park their cars. This one, we believe, have a slight impact on the rating... We'll see.
+
+## 1.5 Restaurant features
+* A lot of information about restaurants, from location to its features.
+
+As we already know that all restaurants are in Mexico, we start by removing the country attribute. Also, due to a lot of unkown data, and for memory efficiency, we also remove other attributes we consider to not be important.
+
+```{r pre_res_info_summary}
+# get a summary of the data
+summary(res_info)
+```
+
+This is the first troubled dataset as there are a few things missing:   
+1. address,     
+2. city,     
+3. state,   
+4. country,   
+5. fax,   
+6. zip,   
+7. url.   
+
+We are not able to fill in the data, using for instance the K-Nearest neighbors imputation, as each missing information if specific a restaurant; it would work well, but it would get inconsistent with the truth- and we speak the truth. So, as we have the power of geolocalization we decided to try to fill in the missing values from each restaurant' coordinates, using Google Maps. However, this service is very limiting in terms of the dayly allowed queries, and we needed to make, at least, 130, which was simply not possible to be deterministic: sometimes it worked, sometimed it did not. Also, this missing information we think isn't that important for our analysis (only might have impact on the analysis refering to the distance between users and restaurants, but even for this we could use the coordinates)- for that reason, we remove these attributes.
+Intuitively, we don't think that a restaurant is better for having a fax machine either...
+
+```{r pre_res_info_rm_attr}
+# attributes removal
+res_info <- res_info[, !names(res_info) %in% c("address","city","state","country","zip","fax","url")]
+```
+
+Now for the important features, we try to squeeze its contents, and see the correlation between all of them.
+
+```{r pre_res_info_features}
+# get a summarization of the features the restaurants
+describe(res_info[,6:ncol(res_info)])
+
+# get a correlation plot to easily observe correlations influences between attributes
+res_info_cor_matrix <- cor(data.matrix(res_info[,6:ncol(res_info)]))
+corrplot(res_info_cor_matrix)
+```
+
+Some of the correlations between the attributes (the connection between variables):   
+* "area" and "dress_code": a negative one, meaning, one discourage the other;   
+* "area" and "smoking_area": a positive one, they go along;   
+* "franchise" and "price": a positive one.   
+
+And we also factorize the categorical variables presented in this dataframe, for efficiency:
+
+```{r pre_res_info_factors}
+res_info$price <- factor(res_info$price, levels=c("low","medium","high"))
+res_info$smoking_area <- factor(res_info$smoking_area, levels=c("none","not permitted",
+                                                                "permitted","section","only at bar"))
+res_info$accessibility <-factor(res_info$accessibility, levels=c("no_accessibility",
+                                                                 "partially","completely"))
+```
+
+## 1.6 User cuisine preferences
+
+* States the preferences of the users for the cuisine kind.
+
+```{r pre_user_cuisine}
+
+# see a few lines
+head(user_cuisine$Rcuisine)
+
+# get a summary of the data
+summary(user_cuisine)
+```
+
+```{r pre_user_cuisine_plot, echo=FALSE}
+# and a plot of the top 10 preferences
+ user_cuisine %>% group_by(Rcuisine) %>% summarise(cnt = n()) %>% mutate(perc = cnt/nrow(user_cuisine)*100)%>%arrange(desc(perc))  %>% head(10) %>%
+  ggplot(aes(reorder(Rcuisine, perc), perc, fill = perc)) + geom_bar(stat = "identity") + coord_flip() +  labs(y = 'Percentage', x = 'Cuisine') +ggtitle("Top 10 cuisine preferences")
+```
+The vast majority of users prefer Mexican food.
+
+## 1.7 User prefered payment method
+
+* Prefered payment method of users.   
+
+```{r pre_user_payment}
+# see a few lines
+head(user_payment)
+
+# see a quick summary
+summary(user_payment)
+```
+
+Here, we do the same treatment we did in the payment methods section referring to the restaurants.
+
+```{r pre_user_payment_1}
+Debit_Credit_cards<-c("VISA","MasterCard-Eurocard","American_Express","bank_debit_cards",
+                      "Visa", "Japan_Credit_Bureau", "Discover", "Diners_Club")
+levels(user_payment$Upayment)[levels(user_payment$Upayment) %in%
+                                Debit_Credit_cards] <- "Debit_Credit_cards"
+levels(user_payment$Upayment) <- capFirst(levels(user_payment$Upayment))
+
+user_payment <- unique(user_payment[1:nrow(user_payment),])
+
+levels(user_payment$Upayment)
+
+# check the relative frequencies of the new category-organized data
+user_payment %>% group_by(Upayment) %>% summarise(cnt = n()) %>% arrange(desc(cnt))
+```
+
+Cash ahead!
+
+
+## 1.8 User information
+
+* Similar to what we have on restaurants, we also have a few information on users.
+
+```{r pre_user_info}
+# get a quick summary of the raw data
+summary(user_info)
+```
+
+Attributes missing information:   
+1. smoker,   
+2. dress_preference,   
+3. ambience,   
+4. transport,   
+5. marital_status,   
+6. hijos,   
+7. activity,   
+9. budget.   
+
+Oh, man... A lot of missing information. In this case, the situation is different from the restaurants, because the users are our actors, and we need to correlate the available features of the restaurants with the features of the users. For this purpose, we now do a KNN imputation, meaning, we are going to use information available to fill in the missing one, taking into account similar users.
+
+```{r pre_user_info_knn}
+#user_info <- read.csv("RCdata/userprofile.csv")
+
+complete.cases(user_info)
+
+# tranform all '?' into a NA, so the knnImputation() can identify the missing values
+user_info[user_info == '?'] <- NA
+
+levels(user_info$smoker)[match("?",levels(user_info$smoker))] <- "NA"
+levels(user_info$dress_preference)[match("?",levels(user_info$dress_preference))] <- "NA"
+levels(user_info$ambience)[match("?",levels(user_info$ambience))] <- "NA"
+levels(user_info$transport)[match("?",levels(user_info$transport))] <- "NA"
+levels(user_info$marital_status)[match("?",levels(user_info$marital_status))] <- "NA"
+levels(user_info$hijos)[match("?",levels(user_info$hijos))] <- "NA"
+levels(user_info$activity)[match("?",levels(user_info$activity))] <- "NA"
+levels(user_info$budget)[match("?",levels(user_info$budget))] <- "NA"
+
+complete.cases(user_info)
+
+a <- knnImputation(user_info, k=1)
+
+#voltam a aparecer os '?'
+summary(a)
+```
+
+
+## 1.9 Ratings
+
+* Contains the evaluations of users on restaurants.   
+
+In theory, there should only be one rate for the combinations of user and restaurant.
+```{r pre_rating}
+rating %>% group_by(userID, placeID) %>% count() %>% arrange(desc(n)) %>% filter(n>1)
+```
+
+Now we try to analyse the correlation between ratings and features of restaurants:
+
+```{r pre_rating_plot, echo=FALSE}
+res_ratings <- rating %>% group_by(placeID) %>% 
+  summarise(mean_global = mean(rating), mean_food = mean(food_rating), mean_service = mean(service_rating)) %>% 
+  select(placeID, mean_global, mean_food, mean_service) %>% arrange(desc(mean_global))
+
+res_info <- right_join(res_info,res_ratings, by="placeID")
+res_info_matrix <- data.matrix(res_info)
+res_info_cor_matrix <- cor(res_info_matrix)
+
+corrplot(cor(res_info_cor_matrix), type="upper")
+```
+
+There are some strong negative correlations...
+
+Let's now see the numbers on the ratings of the restaurants:
+
+```{r pre_rating_mean}
+# the top 10 most rated
+rating %>% group_by(placeID) %>% summarise(cnt = n()) %>% arrange(desc(cnt)) %>% head(10)
+
+rating %>% group_by(placeID) %>% summarise(mean_global = mean(rating), mean_food = mean(food_rating),
+                                           mean_service = mean(service_rating)) %>% select(placeID, mean_global, mean_food, mean_service) %>% arrange(desc(placeID))
+```
+
+
+```{r pre_rating_dist_plots, echo=FALSE}
+rating_rating <- rating %>% group_by(rating) %>% summarise(n=n()) %>% mutate(freq = n / sum(n)*100)
+ggplot(rating_rating, aes(x=rating, y=freq)) + geom_bar(stat="identity") + ggtitle("Frequency of the different overall ratings")
+
+rating_food <- rating %>% group_by(food_rating) %>% summarise(n=n()) %>% mutate(freq = n / sum(n)*100)
+ggplot(rating_food, aes(x=food_rating, y=freq)) + geom_bar(stat="identity") + ggtitle("Frequency of the different food ratings")
+
+rating_service <- rating %>% group_by(service_rating) %>% summarise(n=n()) %>% mutate(freq = n / sum(n)*100)
+ggplot(rating_service, aes(x=service_rating, y=freq)) + geom_bar(stat="identity") + ggtitle("Frequency of the different ratings on service")
+
+number_ratings_user <- rating %>% group_by(userID) %>% summarise(n_ratings=n(), mean=mean(rating) , median=median(rating), sd=sd(rating), var=var(rating)) 
+
+ggplot(number_ratings_user, aes(x=n_ratings)) + geom_bar()+ ggtitle("Count of ratings given by users")
+```
+
+Here we try to find atypical user behaviour (always the same rating).
+
+```{r pre_atypical_users}
+## always 0
+atypical_users <- number_ratings_user %>% filter(sd==0)
+## always 2
+atypical_users %>% filter(mean==2)
+## always 1
+atypical_users %>% filter(mean==1)
+```
+
+
+```{r ratings_per_restaurant, echo=FALSE}
+number_ratings_restaurant <- rating %>% group_by(placeID) %>% summarise(n_ratings=n())
+ggplot(number_ratings_restaurant, aes(x=n_ratings)) + geom_bar() + ggtitle("Ratings per restaurant")
+```
+
+```{r user_ratings, echo=FALSE}
+# overall rating distribution
+rating %>% group_by(placeID) %>% summarise(avg_rating = mean(rating)) %>% ggplot( aes(x=avg_rating)) + geom_histogram() + ggtitle("Distribution of mean user ratings")
+```
+
+
+```{r top10restaurants, echo=FALSE}
+rating %>% group_by(placeID) %>% summarise(cnt = n(), global_avg=mean(rating), food_avg=mean(food_rating), service_avg=mean(service_rating), all_ratings_avg=(global_avg+food_avg+service_avg)/3)%>% 
+  arrange(desc(cnt)) %>% head(10) %>% 
+  left_join(res_info, by="placeID") %>% 
+  select(placeID, name, cnt, all_ratings_avg) %>%
+  ggplot(aes(x=reorder(placeID,cnt), y=cnt, fill=all_ratings_avg)) + geom_bar(stat="identity") + coord_flip() + ggtitle("Top 10 most rated restaurants")
+```
+
+```{r top10rated, echo=FALSE}
+rating %>% group_by(placeID) %>% summarise(cnt = n(), global_avg=mean(rating), food_avg=mean(food_rating), service_avg=mean(service_rating), all_ratings_avg=(global_avg+food_avg+service_avg)/3)%>% 
+  arrange(desc(all_ratings_avg)) %>% head(10) %>% 
+  left_join(res_info, by="placeID") %>% 
+  select(placeID, name, cnt, all_ratings_avg) %>% 
+  ggplot(aes(y=all_ratings_avg, x=reorder(placeID, all_ratings_avg), fill=cnt)) + geom_bar(stat="identity") + coord_flip()+ ggtitle("Top 10 best rated restaurants")
+
+```
+
+```{r echo=FALSE}
+# relation between the number of ratings and the evaluation
+rating %>% group_by(placeID) %>% summarise(cnt = n(), global_avg=mean(rating), food_avg=mean(food_rating), service_avg=mean(service_rating), all_ratings_avg=(global_avg+food_avg+service_avg)/3)%>% 
+  arrange(desc(all_ratings_avg)) %>% ggplot(aes(x=cnt, y=all_ratings_avg)) + geom_point() + 
+  stat_smooth(method = "lm", color = "grey", size = 1) + ggtitle("Relation between the number of ratings and the average rating")
+```
+
+It would make sense that the popularity of a restaurant was correlated with its average rating, with popular (more often rated) restaurants having better ratings. But that doesn't seem to be the case.
+
+
+```{r priceAverageRatings, echo=FALSE}
+user_info_with_ratings <- right_join(user_info, rating %>% group_by(userID) %>%  summarise(n_ratings=n(), rating_avg=mean(rating), food_avg=mean(food_rating), service_avg=mean(service_rating), all_ratings_avg=(rating_avg+food_avg+service_avg)/3), by="userID")
+
+res_info_with_ratings <- right_join(res_info, rating %>% group_by(placeID) %>%   summarise(n_ratings=n(), rating_avg=mean(rating),food_avg=mean(food_rating),service_avg=mean(service_rating),all_ratings_avg=(rating_avg+food_avg+service_avg)/3),   by="placeID")
+
+res_info_by_rating_type  <- res_info_with_ratings %>% group_by(price) %>% 
+  summarise(rating=mean(rating_avg), food_rating=mean(food_avg), service_rating=mean(service_avg)) %>% gather("type_rating", "value", 2:4)
+res_info_by_rating_type$price <- factor(res_info_by_rating_type$price, levels=c("low","medium","high"))
+res_info_by_rating_type %>%
+  ggplot(aes(x=price, y=value, colour=type_rating)) +
+  geom_point() +
+  geom_line(aes(group=type_rating)) +
+  ggtitle("Relation between price and average ratings")
+
+```
+More exepensive restaurants have better ratings.
+
+In here we create a function that correlates attributes between users and restaurants, so we are able to see the connection between attributes from the users and their correspondents of the restaurants.
+
+```{r functionCorrelationRatings}
+ratings_by_groups <- function(res_group, user_group) {
+  rating  %>% inner_join(res_info,by="placeID") %>% inner_join(user_info, by="userID") %>% 
+  select_("userID", "placeID", "rating", "food_rating", "service_rating", res_group, user_group) %>% drop_na() %>%
+  group_by_(res_group,user_group) %>% summarise(cnt=n(), rating=mean(rating), food_rating=mean(food_rating), service_rating=mean(service_rating)) %>% return
+}
+
+rating_by_price_and_budget <- ratings_by_groups("price","budget")
+rating_by_smokingArea_and_smokers <- ratings_by_groups("smoking_area", "smoker")
+rating_by_alcohol_and_drinkLevel <- ratings_by_groups("alcohol","drink_level")
+rating_by_parkingOptions_and_transport <- ratings_by_groups("accessibility","transport")
+rating_by_dressCode_and_dressPreference <- ratings_by_groups("dress_code","dress_preference")
+```
+
+### Ratings on price splited into three types of users
+* high budget and low budget users give better ratings to average priced restaurants
+* average budget users give better ratings to high priced restaurants
+
+```{r ratings_by_price_and_budget, echo=FALSE}
+rating_by_price_and_budget %>% ggplot(aes(x=price,y=rating, color=budget)) + geom_point() + geom_line(aes(group=budget))
+rating_by_price_and_budget %>%  ggplot(aes(x=price,y=food_rating, color=budget)) + geom_point() + geom_line(aes(group=budget))
+rating_by_price_and_budget %>%  ggplot(aes(x=price,y=service_rating, color=budget)) + geom_point() + geom_line(aes(group=budget))
+```
+
+
+### Ratings on smoking area split into two types of users
+* Smokers seems to prefer restaurants where they can smoke at the bar.
+* Smokers give worse ratings to restaurants where they can't smoke.
+* Non-smokers don't seem to change their ratings according to whatever kind of smoking areas restaurants have.
+```{r ratingsBuSmokingArea , echo=FALSE}
+rating_by_smokingArea_and_smokers %>% ggplot(aes(x=smoking_area, y=rating, color=smoker)) + geom_point() + geom_line(aes(group=smoker))
+rating_by_smokingArea_and_smokers %>% ggplot(aes(x=smoking_area, y=food_rating, color=smoker)) + geom_point() + geom_line(aes(group=smoker))
+rating_by_smokingArea_and_smokers %>% ggplot(aes(x=smoking_area, y=service_rating, color=smoker)) + geom_point() + geom_line(aes(group=smoker))
+```
+
+### Ratings on alcohol split into three types of users
+* Users who do not drink alcohol give better ratings to restaurants that serves beer/wine.
+* Users who drink casualy give better ratings to restaurants with full bar.
+
+```{r ratingsByAlcohol, echo=FALSE}
+rating_by_alcohol_and_drinkLevel %>% ggplot(aes(x=alcohol, y=rating, color=drink_level)) + geom_point() + geom_line(aes(group=drink_level))
+rating_by_alcohol_and_drinkLevel %>% ggplot(aes(x=alcohol, y=food_rating, color=drink_level)) + geom_point() + geom_line(aes(group=drink_level))
+rating_by_alcohol_and_drinkLevel %>% ggplot(aes(x=alcohol, y=service_rating, color=drink_level)) + geom_point() + geom_line(aes(group=drink_level))
+```
+
+### Ratings on dress code split on four types of users 
+* Users give better ratings to restaurants with a formal dress code independently of their dressing preferences.
+
+```{r ratingsByDressCode, echo=FALSE}
+rating_by_dressCode_and_dressPreference %>% ggplot(aes(x=dress_code, y=rating, color=dress_preference)) + geom_point() + geom_line(aes(group=dress_preference))
+rating_by_dressCode_and_dressPreference %>% ggplot(aes(x=dress_code, y=food_rating, color=dress_preference)) + geom_point() + geom_line(aes(group=dress_preference))
+rating_by_dressCode_and_dressPreference %>% ggplot(aes(x=dress_code, y=service_rating, color=dress_preference)) + geom_point() + geom_line(aes(group=dress_preference))
+```
+
+### Ratings on acessibility split on three types of users
+* Acessibility doesn't seem to affect the ratings.
+
+```{r ratingsByParking, echo=FALSE}
+rating_by_parkingOptions_and_transport %>% ggplot(aes(x=accessibility, y=rating, color=transport)) + geom_point() + geom_line(aes(group=transport))
+rating_by_parkingOptions_and_transport %>% ggplot(aes(x=accessibility, y=food_rating, color=transport)) + geom_point() + geom_line(aes(group=transport))
+rating_by_parkingOptions_and_transport %>% ggplot(aes(x=accessibility, y=service_rating, color=transport)) + geom_point() + geom_line(aes(group=transport))
+```
+
+
+
+
+# 2 Recommender systems
+
+
+```{r binary_non-binary_data}
+bm <- as(rating[,1:2], "binaryRatingMatrix") #visited/not visited
+rm <- as(rating[,1:3], "realRatingMatrix")   #global rating
+
+# rm <- normalize(rm) --already done
+
+#(for checking purposes)
+#b <- as(bm, "matrix")
+#r <- as(rm, "matrix")
+```
+
+Our data is in a non-binary format as we have the ratings given to each restaurant by the users: we tried to do the transformation, counting having a rate as a visit, into a 0-1 matrix using binarize() from recommenderlab package, but we noticed that this transformation is done when coercing the data frame to a binaryRatingMatrix (when converting back from "binaryRatingMatrix" to "matrix"). That's why we do not do this transformation explicity.
+
+For all the models to be generated we are going to need the rating data in binary and non-binary format. We start by doing it, by coercing the data frame with user-restaurant rating information to a binaryRatingMatrix for recommendation with binary info, and realRatingMatrix for recommendation with non-binary info - only non-NA values are stored explicitly, wich makes it more efficient to work with.
+
+We split the analysis into two sections: considering binary(bm) and non-binary(rm) information. For the binary, we count each restaurant evaluation as a visit from a user; unrated restaurants by a certain user are assumed to not have been visited by him. The non-binary information corresponds to the ratings given by users to restaurants (so, a missing rating corresponds to a NA value).
+
+An important operation for rating matrices is to normalize the entries to, e.g., centering to remove rating bias by subtracting the row mean from all ratings in the row- this could be done with normalize(). However, this data is already normalized, as warned by this function, so no need for that.
+
+All recommendation models are obtained using the package recommenderlab; a recommender is created using the creator function Recommender().
+
+The top-N kind of recommendations are generated by predict(). So, in order to predict the top 2, we set the parameters "type" and "n" to "topNlist" and 2, respectively. In this way, the function returns a list of the 2 predicted values (top 2 recommendations); this list contains recommendations for all the users, so we need to select wich one we would like to see.
+
+### 2.1 Popularity
+
+#### 2.1.1 Using simple recommendation strategies
+
+At the begining of the assignment, we assumed that one of the intentions was to make a recommender systems ourselves, so we could compare to some of the recommender systems that we have talked about during classes. Later one we found out this was not the purpose. Even though, it counts as a good learning experience, which we would like to share.
+
+##### 2.1.1.1 The simplest one
+```{r pop_the_simplest_one}
+#inspect how many times each restaurant was rated/visited
+table(rating$placeID)
+#sort the restaurants by decreasing number of visits
+sr <- sort(table(rating$placeID), decreasing = TRUE)
+#obtain the top 3 restaurants for recommendation
+names(sr)[1:3]
+```
+
+##### 2.1.1.2 Top-N function based on the number of evaluations
+
+We created a function that takes as inpute an user id, and a value specifying the number of items to present as the top ones. This function only takes into account the number of evaluations, so it gives the most evaluated restaurants.
+
+```{r pop_topn}
+get_topN_popularity <- function(user, n_top) {
+  rated_restaurants <- tbl_df(rating)
+  rated_restaurants_all <- group_by(rated_restaurants, placeID) %>% count %>% arrange(desc(n)) %>% select(placeID) 
+  rated_restaurants_user <- filter(rating, userID==user) %>% select(placeID)
+  top <- setdiff(rated_restaurants_all,rated_restaurants_user) %>% head(n_top)
+  return(top)
+}
+```
+
+
+Lets say we want the get the top 3 restaurants recommendation for the user with id U1111:
+
+```{r pop_topn_use}
+top10 <- get_topN_popularity("U1111", 3)
+(top10 <- left_join(top10, res_info, by="placeID") %>% select(placeID))
+```
+
+##### 2.1.1.2 Top-N function based on the quality of the evaluations
+
+This function take the same parameters as the previous one.
+
+```{r}
+get_topN_popularity <- function(user, n_top) {
+  rated_restaurants <- tbl_df(rating)
+  rated_restaurants_all <- mutate(rated_restaurants, avg=(rated_restaurants$rating+rated_restaurants$food_rating+rated_restaurants$service_rating)/3) %>% arrange(desc(avg))
+  rated_restaurants_all <- rated_restaurants_all %>% group_by(placeID) %>% summarise(cnt=n(), average_rating=sum(avg)/cnt) %>% arrange(desc(average_rating))
+  rated_restaurants_user <- filter(rating, userID==user) %>% select(placeID)
+  top <- setdiff(rated_restaurants_all$placeID,rated_restaurants_user$placeID) %>%  head(n_top)
+  top <- tibble(placeID=top)
+  return (top)
+}
+```
+
+And if we execute:
+
+```{r echo=FALSE}
+top10 <- get_topN_popularity("U1111",10)
+(top10 <- left_join(top10, res_info, by="placeID") %>% select(placeID))
+```
+
+#### 2.1.2 Using recommenderlabs package
+
+We want to know restaurants recommendation based on popularity. As basis, we only take into account the data containing all evaluations made to each restaurant by the users. The point, of course, is to be able to recommend good rated restaurants to a user from whom we may know nothing about.
+
+```{r popularity_binary}
+# create the models
+modelPOPb <- Recommender(bm, method="POPULAR")
+modelPOPr <- Recommender(rm, method="POPULAR")
+
+# generate 2 recommendations
+predb <- predict(modelPOPb, bm, type="topNList", n=2)
+predr <- predict(modelPOPr, rm, type="topNList", n=2)
+```
+
+```{r popularity_pred, echo=FALSE}
+# predictions based on binary information
+m <- matrix(c(getList(predb)$U1001,
+              getList(predb)$U1002,
+              getList(predb)$U1003),
+              ncol=2)
+colnames(m) <- c("1","2")
+row.names(m) <- c("U1001","U1002","U1003")
+print("Predicted values using binary information")
+(m <- as.table(m))
+
+# predictions based on non-binary information
+m <- matrix(c(getList(predr)$U1001,
+              getList(predr)$U1002,
+              getList(predr)$U1003,
+              getList(predr)$U1004,
+              getList(predr)$U1005),
+              ncol=2)
+colnames(m) <- c("1","2")
+rownames(m) <- c("U1001","U1002","U1003","U1004","U1005")
+print("Predicted values using non-binary information")
+(as.table(m))
+```
+
+Intuitively, as this kind of analysis takes no information other than evaluations, one would expect the same kind of results for every user: only the best rated restaurants. In fact, this does not occur as it makes no sense to recommend a restaurant to a user who has already visited it. For instance, as it is possible to observe from the outputs above, users U1001 and U1002 have the same restaurant recommendations: 135032 and 132834; on the other hand, the recommendations for user U1003 only have one restaurant in common with U1001 and U1002 (135032), as he has already visited 132834. The same logic follows for the non-binary information.
+
+### 2.2 Association Rules
+
+Task: we want to be able to predict which restaurants the visitor is most interested at some point (in this case, in the final of our analysis, but this could be implemented as a live recommender system which would recommend restaurants at the time of the query).
+
+Strategy: look for restaurants that were visited and look for sets of restaurants that predict other sets of restaurants using association rule discovery. So, the model is a set of discovered rules, from which we make queries to get the best ones depending on the previouly visited restaurants.  
+
+An easy way to see the who rated which restaurant, and to visually find patterns is with image() function.  
+```{r assoc_rules_rm,echo=FALSE}
+# column represents one specific restaurant and ratings by users are shaded
+image(bm, main="Ratings")
+```
+
+To construct our association rule based recommendation model, some parameters are required; the better these parameters, the better is our model. For instance, a value for confidence must be chosen: if we set the bar to high we may get into a point where we do not get any recommendation (or few, although really strong ones); if we set it too low we get too many recommendations (being the majority weak ones).
+
+In order to archieve good results, we need to evaluate different combinations of values- we do so using the k-fold cross validation method: the key idea is to split the data into k parts, and, for each run, k-1 parts are used for training and the remaining part is used for testing, repeating this process a total of k times. We choose our k=5.
+
+We set some values for the paramaters "support", "confidence" and "maxlen". Some short explanations on these parameters:  
+  -support: the minimum support of a rule, how many transactions support the condition;  
+  -confidence: the minimum confidence of a rule, the significance of a rule;  
+  -maxlen: the maximum number of restaurants we want to be included (correlated) in a rule.
+
+To evaluate recommender algorithms, package recommenderlab provides the infrastructure to create and maintain evaluation schemes stored as an object of class evaluationScheme. The function evaluate() is then used to evaluate several recommender algorithms using an evaluation scheme resulting in a evaluation result list with one entry per algorithm. We use this way to figure out wich parameters are the best according to some error measures.
+As stated in the slides[5], we set a very low support (10/|DB|), and we vary the confidence - even though there are values we know for sure that will be bad, we want to see their impact graphically. Also, following the phrase "one is bad, two are bad luck, three are not a coincidence", we set the maximum number of restaurants to be used in a rule as 3- long rules have the danger of overfitting data.
+
+```{r assoc_rules_bv, results=FALSE}
+set.seed(1234)
+scheme <- evaluationScheme(bm, method="cross-validation", k=5, given=3)
+
+algorithms <- list(
+  "1"   = list(name="AR", param=list(support = 10/nrow(rating), conf = 1,   maxlen = 3)),
+  "0.9" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.9, maxlen = 3)),
+  "0.8" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.8, maxlen = 3)),
+  "0.7" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.7, maxlen = 3)),
+  "0.6" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.6, maxlen = 3)),
+  "0.5" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.5, maxlen = 3)),
+  "0.4" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.4, maxlen = 3)),
+  "0.3" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.3, maxlen = 3)),
+  "0.2" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.2, maxlen = 3)),
+  "0.1" = list(name="AR", param=list(support = 10/nrow(rating), conf = 0.1, maxlen = 3))
+)
+
+results <- evaluate(scheme, algorithms, type = "topNList", n=c(1,2,5))
+```
+
+```{r assoc_rules_bv_plot}
+plot(results, "prec/rec", annotate=TRUE)
+```
+
+This is the tough part: we would want higher values of precision and recall (highly specialised, very picky), so the ones that go closer to the right superior corner would be the better parameters for our model - sometimes it's more important to correctly classify the samples than getting all of them (high precision); sometimes it's more important to get all of them (high recall) than getting all of them correctly. Even though, we don't want to overstep here, and we prefer a higher precision model, with medium-to-low sensitivity (recall). From the graph, and assuming only the parameters tested, we choose to go with **confidence=0.7**.  
+
+```{r assoc_rules_model}
+#get the model
+modelAR <- Recommender(bm, method="AR",
+                       parameter=list(support = 10/nrow(rating), conf = 0.7, maxlen = 3))
+
+# object containing all the rules
+rules <- getModel(modelAR)$rule_base
+
+# generate a prediction based on the model obtained above
+pred<- predict(modelAR, bm, n = 2)
+```
+  
+```{r assoc_rules_pred, echo=FALSE}
+cat("Predicted values based on the rules available in the model\n")
+cat("U1001 ")
+getList(pred)$U1001
+cat("U1002 ")
+getList(pred)$U1002
+cat("U1003 ")
+getList(pred)$U1003
+cat("U1127 ")
+getList(pred)$U1127
+cat("U1138 ")
+getList(pred)$U1138
+```
+
+
+Well, it appears that with a 0.7 confidence some users do not get a recommendation, or only one, such as U1127 and U1138. This means that there's no rule in our model having the left hand side with the restaurants they have visited. For instance, if we drop the confidence, more rules are retained and eventually they will end up to having recomendations, even though theoretically not very strong ones.   
+
+
+```{r assoc_rules_model_1}
+# get a new model with confidence 0.6
+modelAR <- Recommender(bm, method="AR",
+                       parameter=list(support = 10/nrow(rating), conf = 0.6, maxlen = 3))
+
+# object containing all the rules
+rules <- getModel(modelAR)$rule_base
+
+# generate a prediction based on the model obtained above
+pred<- predict(modelAR, bm, n = 2)
+```
+
+```{r assoc_rules_pred1, echo=FALSE}
+cat("Predicted values based on the rules available in the model\n")
+cat("U1001 ")
+getList(pred)$U1001
+cat("U1002 ")
+getList(pred)$U1002
+cat("U1003 ")
+getList(pred)$U1003
+cat("U1127 ")
+getList(pred)$U1127
+cat("U1138 ")
+getList(pred)$U1138
+```
+
+With the drop of confidence to 0.6 all users have now recomendations, as expected. A note to the unchanged recommendations for the rest of the users. As we were expecting, this change doesn't affect the strength of the recommendations that were part of the 0.7 confidence model- those were pretty good; the less value for confidence only makes sure more rules are possible to remain as we set the low bar even lower.
+
+
+### 2.3 Collaborative Filtering
+
+Collaborative filtering uses given rating data by many users for many items as the basis for predicting missing ratings and/or for creating a top-N recommendation list for a given user, called the active user.
+
+In  collaborative  filtering,  and taking into account our data, the  customers’ preference  data  for  restaurants  are  collected  and  a  customer is recommended restaurants that they are likely to enjoy based on their preferences. 
+
+The user will be recommended restaurants that people with similar tastes and preferences liked in the past; we do not need to now more information on the restaurants.
+
+For the collaborative filtering it is better to have more ratings per user. So as a rule of tumb our idea was to remove users who have had rated fewer than 3 restaurants- this does not occur, which is nice.
+
+```{r cf_rm_less_than_three, results=FALSE}
+rating %>% group_by(userID) %>% mutate(n = n()) %>% filter(n<3)
+```
+
+We could calculate the distance between users and the distance between restaurants so we could see whose users are similar, and which restaurants are alike, using the similarity function - this takes a method arguments to specify which one we would like to use (we are using "cosine", but we could use "pearson", "jaccard", etc). Although, given the big dimensions of the data, even though it would be nice to print it in, it would take a few pages...
+
+```{r users_restaurants_similarity, eval=FALSE}
+simCos_users <- similarity(bm, method = "cosine")
+simCos_items <- similarity(bm, method = "cosine", which = "items")
+```
+
+So, taking int account the binary information, once again we start by using Recommender() to generate our model, this time specifying "UBCF" and "IBCF" for user-based and item-based collaborative filtering.
+Once again we need to calibrate our model, as it takes parameters: the nearest neighbours (neighborhood size)- we do another 5-fold cross validation. Another parameter we set is the similarity method to be used: cosine.
+
+```{r cf_bv_scheme, results=FALSE}
+set.seed(1234)
+scheme <- evaluationScheme(bm, method="cross-validation", k=5, given=3)
+```
+
+
+```{r cf_bv_ub, results=FALSE}
+algorithms <- list(
+  "3" = list(name="UBCF", parameter = list(method = "cosine", nn = 3)),
+  "5" = list(name="UBCF", parameter = list(method = "cosine", nn = 5)),
+  "10" = list(name="UBCF", parameter = list(method = "cosine", nn = 10)),
+  "15" = list(name="UBCF", parameter = list(method = "cosine", nn = 15)),
+  "30" = list(name="UBCF", parameter = list(method = "cosine", nn = 20))
+)
+
+results <- evaluate(scheme, algorithms, type = "topNList", n=c(1,2,5))
+```
+
+```{r cf_bv_ub_plot}
+plot(results, "prec/rec", main="UBCF", annotate=TRUE)
+```
+
+
+```{r cf_bv_ib, results=FALSE}
+algorithms <- list(
+  "3" = list(name="IBCF", parameter = list(method = "cosine", k = 3)),
+  "5" = list(name="IBCF", parameter = list(method = "cosine", k = 5)),
+  "10" = list(name="IBCF", parameter = list(method = "cosine", k = 10)),
+  "15" = list(name="IBCF", parameter = list(method = "cosine", k = 15)),
+  "20" = list(name="IBCF", parameter = list(method = "cosine", k = 20))
+)
+
+results <- evaluate(scheme, algorithms, type = "topNList", n=c(1,2,5))
+```
+
+```{r cf_bv_ib_plot}
+plot(results, "prec/rec", main="IBCF", annotate=TRUE)
+```
+
+We go for nn=10 and k=5, using the same criteria we used in the Association rule based recommendation system, and set n=2 to get the top 2 for the user U1001.
+
+```{r cf_binary}
+#user based
+bmodelUB <- Recommender(bm, "UBCF", parameter = list(method = "cosine", nn = 10))
+#item based
+bmodelIB <- Recommender(bm, "IBCF", parameter = list(method = "cosine", k = 5))
+
+#top 2 prediction
+bpredub <- predict(bmodelUB, bm, n = 2)
+bpredib <- predict(bmodelIB, bm, n = 2)
+```
+
+
+```{r cf_n-binary}
+#user based
+nbmodelUB<- Recommender(rm, "UBCF", parameter = list(method = "cosine", nn=2))
+
+#top2 prediction
+nbpredub <- predict(nbmodelUB, rm, n=2)
+```
+
+```{r cf_pred, echo=FALSE}
+# predictions based on binary information
+#UBCF
+m <- matrix(c(getList(bpredub)$U1001,
+              getList(bpredub)$U1002),
+              ncol=2)
+colnames(m) <- c("1","2")
+row.names(m) <- c("U1001","U1002")
+
+print("Predicted values using binary information UBCF")
+(m <- as.table(m))
+
+#IBCF
+m <- matrix(c(getList(bpredib)$U1001,
+              getList(bpredib)$U1002),
+              ncol=2)
+colnames(m) <- c("1","2")
+row.names(m) <- c("U1001","U1002")
+
+print("Predicted values using binary information IBCF")
+(m <- as.table(m))
+
+
+# predictions based on non-binary information
+#UBCF
+m <- matrix(c(getList(nbpredub)$U1001,
+              getList(nbpredub)$U1002),
+              ncol=2)
+colnames(m) <- c("1","2")
+row.names(m) <- c("U1001","U1002")
+
+print("Predicted values using non-binary information UBCF")
+(m <- as.table(m))
+```
+
+
+### 2.4 Recommendation systems evaluation: comparing top-N recommendations
+
+To evaluate recommender algorithms, package recommenderlab provides the infrastructure to create and maintain evaluation schemes stored as an object of class evaluationScheme from rating data. The function evaluate() is then used to evaluate several recommender algorithms using an evaluation scheme resulting in a evaluation result list with one entry per algorithm. Each object of evaluationResult contains one or several object of confusionMatrix depending on the number of evaluations specified in the evaluationScheme. With this infrastructure several recommender algorithms can be compared on a data set with a single line of code.
+
+We use the same function we used to evaluate all the other recommendation systems, but now with a list of algorithms together with their parameters.
+In the following we use the evaluation scheme created to compare the four recommender algorithms: popular restaurants, association rules, user-based CF, item-based CF.
+
+Next we evaluate each recommender algorithm: we start by creating a 5-fold cross validation scheme, specifying its parameters; only then we evaluate top-1, top-2 and top-5 recommendation lists.
+
+```{r rec_evaluation, results=FALSE}
+set.seed(1234)
+# create an evaluation scheme (5-fold cross validation, given-3 scheme)
+scheme <- evaluationScheme(bm, method="cross-validation", k=5, given=3)
+
+algorithms <- list(
+  POPULAR = list(name="POPULAR"),
+  ASSOC_RULES = list(name="AR",
+                     parameter=list(support = 10/nrow(rating), conf = 0.6, maxlen = 3)),
+  UBCF = list(name="UBCF", param=list(method = "cosine", nn=10)),
+  IBCF = list(name="IBCF", param=list(method = "cosine", k=5))
+)
+
+results <- evaluate(scheme, algorithms, type = "topNList", n=c(1,2,5))
+```
+
+```{r rec_evaluation1}
+# average confusion matrices for the 5 runs
+avg(results)
+
+plot(results, "prec/rec", annotate=TRUE)
+```
+
+* Looking only for each average results table, we see that "Popular"" is the worst recommender system taking into account the true positives, meaning a low performance as a recommender system, and looking to the whole picture, in the graph, is far from the rest of the recommendation systems.
+
+* Looking only to the graph, the closer to the superior right corner the best: this means Collaborative filtering outperforms the other recommenders (at least the ones analysed here). On paper this is more robust than the other two, and so can be seen here.
+
+
+## 3 Context-aware recommendation
+The previous models don't take into account the context of the recommendations, being it the customer's budget, smoking habits or drinking level.
+As we've seen previously in the exploratory analysis, there are a number of features that seems to be correlated with the rates given to the restaurants. Namely, the price, the smoking area, the alcohol service and the dress code.
+In this chapter We'll test a couple of different scenarios and build some context aware recommendations customized for those situations.
+For each scenario, we applied two steps:
+  
+1. Pre-filtering the data according to the context in hand.
+2. Comparing the different recommender systems using 5-fold cross-validation for the top 1, 2 and 5 recommendations with binary and/or non binary information.
+
+
+### Scenario 1: Returns cheaper restaurants to low budget users
+Let's compare the performance of context aware models returning cheaper restaurants for users with lower budgets to non-context aware models.
+
+Filtering low budget users and building the rating matrices:
+```{r context1a, results=FALSE}
+
+context_ratings <- rating  %>% inner_join(res_info,by="placeID") %>% inner_join(user_info, by="userID") %>% na.omit() %>% filter(price=="low",budget=="low") %>% select(userID, placeID, rating, food_rating, service_rating)
+
+all_ratings <- rating  %>% inner_join(res_info,by="placeID") %>% inner_join(user_info, by="userID") %>%  na.omit() %>% filter(budget=="low") %>% 
+  select(userID, placeID, rating, food_rating, service_rating)
+
+bm_context <- as(context_ratings[,1:2], "binaryRatingMatrix") 
+bm_all <- as(all_ratings[,1:2], "binaryRatingMatrix")
+
+```
+
+Comparing the results using binary information:
+```{r context1b, results=FALSE}
+set.seed(1234)
+scheme_context <- evaluationScheme(bm_context, method="cross-validation", k=5, given=1)
+scheme_all <- evaluationScheme(bm_all, method="cross-validation", k=5, given=1)
+
+algorithms <- list(
+  POPULAR = list(name="POPULAR", param=NULL),
+  ASSOC_RULES = list(name="AR", param=list(support = 0.0005, conf = 0.5, maxlen = 5)),
+  UBCF = list(name="UBCF", param=list(method = "cosine", nn=3)),
+  UBCF = list(name="UBCF", param=NULL),
+  IBCF = list(name="IBCF", param=list(method = "cosine", k=3))
+)
+
+results <- evaluate(scheme_context, algorithms, type = "topNList", n=c(1,2,5))
+results2 <- evaluate(scheme_all, algorithms, type = "topNList", n=c(1,2,5))
+```
+
+```{r context1c, echo=FALSE}
+par(mfrow=c(1,2)) 
+plot(results)
+title(main="Context-aware")
+plot(results2)
+title(main="Not context-aware")
+
+```
+
+
+
+
+### Scenario 2: returns restaurants where smoking is permitted to smokers.
+
+Filtering smokers from users, and building the rating matrices:
+```{r scenario2A}
+context_ratings <- rating  %>% inner_join(res_info,by="placeID") %>% inner_join(user_info, by="userID") %>% na.omit() %>% filter(smoking_area!="not permitted",smoker=="true") %>% 
+  select(userID, placeID, rating, food_rating, service_rating)
+all_ratings <- rating  %>% inner_join(res_info,by="placeID") %>% inner_join(user_info, by="userID") %>% na.omit() %>% filter(smoker=="true") %>% 
+  select(userID, placeID, rating, food_rating, service_rating)
+
+bm_context <- as(context_ratings[,1:2], "binaryRatingMatrix") 
+bm_all <- as(all_ratings[,1:2], "binaryRatingMatrix")
+
+```
+
+Comparing the results using binary information:
+```{r scenario2B, results=FALSE}
+set.seed(1234)
+scheme_context <- evaluationScheme(bm_context, method="cross-validation", k=5, given=1)
+scheme_all <- evaluationScheme(bm_all, method="cross-validation", k=5, given=1)
+
+results <- evaluate(scheme_context, algorithms, type = "topNList", n=c(1,2,5))
+results2 <- evaluate(scheme_all, algorithms, type = "topNList", n=c(1,2,5))
+```
+```{r scenario2C, echo=FALSE}
+par(mfrow=c(1,2)) 
+plot(results)
+title(main="Context-aware")
+plot(results2)
+title(main="Not context-aware")
+```
+
+
+### Scenario 3: returns restaurants with alcohol service to casual/social alcohol consummers
+Alcohol consumption might be relevant, as users who drink alcohol might prefere restaurants with alcohol service.
+
+Filtering users who consume alcohol:
+```{r scenario3a}
+context_ratings <- rating  %>% inner_join(res_info,by="placeID") %>% inner_join(user_info, by="userID") %>% na.omit() %>% filter(alcohol!="No_Alcohol_served",drink_level!="abstemious") %>% 
+  select(userID, placeID, rating, food_rating, service_rating)
+
+all_ratings <- rating  %>% inner_join(res_info,by="placeID") %>% inner_join(user_info, by="userID") %>% na.omit() %>% filter(drink_level!="abstemious") %>% 
+  select(userID, placeID, rating, food_rating, service_rating)
+
+bm_context <- as(context_ratings[,1:2], "binaryRatingMatrix") 
+bm_all <- as(all_ratings[,1:2], "binaryRatingMatrix")
+
+```
+
+Comparing the results:
+```{r scenario 3b, results=FALSE}
+set.seed(1234)
+scheme_context <- evaluationScheme(bm_context, method="cross-validation", k=5, given=1)
+scheme_all <- evaluationScheme(bm_all, method="cross-validation", k=5, given=1)
+
+results <- evaluate(scheme_context, algorithms, type = "topNList", n=c(1,2,5))
+results2 <- evaluate(scheme_all, algorithms, type = "topNList", n=c(1,2,5))
+```
+
+```{r scenario 3c, echo=FALSE}
+par(mfrow=c(1,2)) 
+plot(results)
+title(main="Context-aware")
+plot(results2)
+title(main="Not context-aware")
+```
+
+### Improvements
+Some work that can possibly improve the predictions for this restaurant-consumer dataset is summarised as follows:   
+* Use a weigth average of the three ratings, instead of just looking for the overall.   
+* Use clustering recommendation.   
+* Build an hybrid model: another type of recommender systems are hybrid models which combine both the content-based and collaborative filtering algorithms.   
+* Incorporate more consumer features into the content-based model. We only have taken into account few attributes of the consumers- more information about the consumer may lead to a improved recommendation system.   
+
+
+
+### References
+[1] https://en.wikipedia.org/wiki/Recommender_system   
+[2] https://archive.ics.uci.edu/ml/datasets/Restaurant+%26+consumer+data   
+[3] Mooney RJ, Roy L (1999) Content-based book recommendation using learning for text   
+categorization. In: Workshop on recommender systems: algorithms and evaluation   
+[4] M.B. Vivek et al., Proceedings of International Conference on Cognition and Recognition, Lecture Notes in Networks and Systems 14, 2018   
+[5] recommenderlab: A Framework for Developing and Testing Recommendation Algorithms, Michael Hahsler, SMU   
+[6] Course slides on Recommendation Systems   
